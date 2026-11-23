@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CloudVault | Gestor Serverless en AWS</title>
+    <style>
+        :root { --primary: #2563eb; --bg: #f8fafc; --card: #ffffff; --text: #1e293b; }
+        body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); max-width: 900px; margin: 0 auto; padding: 20px; }
+        header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #e2e8f0; padding-bottom: 15px; margin-bottom: 25px; }
+        .badge { background: #dbeafe; color: #1e40af; padding: 5px 12px; border-radius: 20px; font-size: 0.85rem; font-weight: bold; }
+        .card { background: var(--card); padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; font-weight: 600; margin-bottom: 5px; }
+        input[type="text"], textarea, select { width: 100%; padding: 10px; border: 1px solid #cbd5e1; border-radius: 8px; box-sizing: border-box; }
+        button { background: var(--primary); color: white; border: none; padding: 12px 20px; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 1rem; }
+        button:hover { background: #1d4ed8; }
+        button:disabled { background: #94a3b8; cursor: not-allowed; }
+        .btn-danger { background: #ef4444; padding: 6px 12px; font-size: 0.85rem; }
+        .btn-danger:hover { background: #dc2626; }
+        .task-item { display: flex; justify-content: space-between; align-items: flex-start; border-left: 5px solid var(--primary); }
+        .priority-Alta { border-left-color: #ef4444; }
+        .priority-Media { border-left-color: #f59e0b; }
+        .priority-Baja { border-left-color: #10b981; }
+        .status-bar { padding: 10px; border-radius: 8px; margin-bottom: 15px; display: none; font-weight: 500; }
+        .status-warn { background: #fef3c7; color: #92400e; display: block; }
+        .status-err { background: #fee2e2; color: #991b1b; display: block; }
+        .file-link { display: inline-block; margin-top: 8px; color: var(--primary); text-decoration: none; font-weight: 600; }
+    </style>
+</head>
+<body>
+    <header>
+        <div>
+            <h1 style="margin:0;">☁️ CloudVault</h1>
+            <small>Plataforma de Gestión Documental y Tareas en AWS</small>
+        </div>
+        <span class="badge" id="healthBadge">🟢 Conectado a AWS</span>
+    </header>
+
+    <div id="resilienceAlert" class="status-bar"></div>
+
+    <div class="card">
+        <h2 style="margin-top:0;">Nuevo Registro en la Nube</h2>
+        <form id="taskForm">
+            <div class="form-group">
+                <label>Título de la Tarea o Documento</label>
+                <input type="text" id="title" required placeholder="Ej. Factura de servidores o Reporte mensual">
+            </div>
+            <div class="form-group">
+                <label>Descripción / Notas</label>
+                <textarea id="description" rows="2" placeholder="Detalles importantes..."></textarea>
+            </div>
+            <div style="display: flex; gap: 15px;">
+                <div class="form-group" style="flex: 1;">
+                    <label>Prioridad</label>
+                    <select id="priority">
+                        <option value="Alta">🔴 Alta</option>
+                        <option value="Media" selected>🟡 Media</option>
+                        <option value="Baja">🟢 Baja</option>
+                    </select>
+                </div>
+                <div class="form-group" style="flex: 2;">
+                    <label>Adjuntar Archivo (Se guarda en Amazon S3)</label>
+                    <input type="file" id="fileInput">
+                </div>
+            </div>
+            <button type="submit" id="submitBtn">Guardar en AWS</button>
+        </form>
+    </div>
+
+    <h3>Registros Almacenados en DynamoDB</h3>
+    <div id="taskList"><p>Cargando datos desde AWS...</p></div>
+
+    <script>
+        const API_URL = "%%API_URL%%";
+
+        // MECANISMO DE RESILIENCIA: Reintento automático con espera exponencial (Exponential Backoff)
+        async function fetchWithResilience(url, options = {}, retries = 3, delay = 1000) {
+            const alertBox = document.getElementById('resilienceAlert');
+            const badge = document.getElementById('healthBadge');
+            
+            for (let i = 0; i < retries; i++) {
+                try {
+                    const response = await fetch(url, options);
+                    if (!response.ok) throw new Error(`Error HTTP: ${response.status}`);
+                    alertBox.style.display = 'none';
+                    badge.innerHTML = '🟢 Conectado a AWS';
+                    badge.style.background = '#dbeafe';
+                    return response;
+                } catch (err) {
+                    badge.innerHTML = '🟡 Reconectando...';
+                    badge.style.background = '#fef3c7';
+                    if (i < retries - 1) {
+                        alertBox.className = 'status-bar status-warn';
+                        alertBox.innerText = `⚠️ Inestabilidad detectada en la red/servicio. Reintentando automáticamente (${i + 1}/${retries})...`;
+                        await new Promise(res => setTimeout(res, delay * (i + 1)));
+                    } else {
+                        badge.innerHTML = '🔴 Sin conexión';
+                        badge.style.background = '#fee2e2';
+                        alertBox.className = 'status-bar status-err';
+                        alertBox.innerText = `❌ No se pudo completar la operación tras ${retries} intentos. Verifica el estado de AWS.`;
+                        throw err;
+                    }
+                }
+            }
+        }
+
+        async function loadTasks() {
+            const list = document.getElementById('taskList');
+            try {
+                const res = await fetchWithResilience(API_URL);
+                const tasks = await res.json();
+                if (tasks.length === 0) {
+                    list.innerHTML = '<div class="card"><p>No hay registros aún. Crea el primero arriba.</p></div>';
+                    return;
+                }
+                list.innerHTML = tasks.map(t => `
+                    <div class="card task-item priority-${t.priority}">
+                        <div>
+                            <h3 style="margin:0 0 5px 0;">${t.title} <small style="font-weight:normal; color:#64748b;">(${t.priority})</small></h3>
+                            <p style="margin:0; color:#475569;">${t.description}</p>
+                            ${t.file_url ? `<a href="${t.file_url}" target="_blank" class="file-link">📎 Ver archivo adjunto (${t.file_name})</a>` : ''}
+                        </div>
+                        <button class="btn-danger" onclick="deleteTask('${t.id}', '${t.file_key || ''}')">Eliminar</button>
+                    </div>
+                `).join('');
+            } catch (e) {
+                list.innerHTML = '<div class="card"><p>Error al cargar los datos.</p></div>';
+            }
+        }
+
+        document.getElementById('taskForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const btn = document.getElementById('submitBtn');
+            btn.disabled = true;
+            btn.innerText = 'Subiendo a la nube...';
+
+            try {
+                const fileInput = document.getElementById('fileInput');
+                let file_key = '';
+                let file_name = '';
+
+                // Si hay archivo, pedimos URL firmada a Lambda y lo subimos directo a S3
+                if (fileInput.files.length > 0) {
+                    const file = fileInput.files[0];
+                    file_name = file.name;
+                    const urlRes = await fetchWithResilience(API_URL, {
+                        method: 'POST',
+                        body: JSON.stringify({ action: 'get_upload_url', file_name: file.name })
+                    });
+                    const { upload_url, file_key: key } = await urlRes.json();
+                    file_key = key;
+
+                    await fetchWithResilience(upload_url, {
+                        method: 'PUT',
+                        body: file
+                    });
+                }
+
+                // Guardamos los metadatos en DynamoDB
+                await fetchWithResilience(API_URL, {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        action: 'create_task',
+                        title: document.getElementById('title').value,
+                        description: document.getElementById('description').value,
+                        priority: document.getElementById('priority').value,
+                        file_key,
+                        file_name
+                    })
+                });
+
+                document.getElementById('taskForm').reset();
+                await loadTasks();
+            } catch (err) {
+                console.error(err);
+            } finally {
+                btn.disabled = false;
+                btn.innerText = 'Guardar en AWS';
+            }
+        });
+
+        async function deleteTask(id, file_key) {
+            if (!confirm('¿Eliminar este registro de AWS?')) return;
+            await fetchWithResilience(API_URL, {
+                method: 'DELETE',
+                body: JSON.stringify({ id, file_key })
+            });
+            await loadTasks();
+        }
+
+        loadTasks();
+    </script>
+</body>
+</html>
